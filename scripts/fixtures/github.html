@@ -1,0 +1,43 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<style>
+  html, body { margin: 0; height: 100%; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #0d1117; color: #c9d1d9; }
+  .top { height: 56px; background: #010409; border-bottom: 1px solid #30363d; display: flex; align-items: center; padding: 0 20px; gap: 16px; font-weight: 600; }
+  .crumb { color: #58a6ff; font-weight: 500; font-size: 14px; }
+  .wrap { padding: 24px 40px; max-width: 980px; }
+  h1 { font-size: 22px; font-weight: 600; margin: 0 0 8px; color: #e6edf3; }
+  .sub { color: #8b949e; font-size: 13px; margin-bottom: 18px; }
+  .open { display: inline-block; background: #238636; color: #fff; font-size: 12px; font-weight: 600; padding: 3px 10px; border-radius: 999px; margin-right: 8px; }
+  .meta { font-size: 13px; color: #8b949e; margin-bottom: 22px; }
+  .meta strong { color: #e6edf3; }
+  .box { border: 1px solid #30363d; border-radius: 8px; overflow: hidden; }
+  .box h2 { margin: 0; padding: 10px 14px; background: #161b22; font-size: 13px; border-bottom: 1px solid #30363d; }
+  .row { padding: 12px 14px; font-size: 14px; line-height: 1.5; border-bottom: 1px solid #21262d; }
+  .row:last-child { border-bottom: 0; }
+  .who { font-weight: 600; color: #e6edf3; }
+  .file { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: #7ee787; }
+</style>
+</head>
+<body>
+  <div class="top">astox <span class="crumb">/ snag</span> <span class="crumb">Pull requests</span></div>
+  <div class="wrap">
+    <h1>feat: cursor-aware screenshot crop</h1>
+    <div class="sub"><span class="open">Open</span> #482 waiting on review</div>
+    <div class="meta"><strong>maya-singh</strong> wants to merge 8 commits into <strong>main</strong> from <strong>feat/snag-crop</strong></div>
+    <div class="box">
+      <h2>Conversation</h2>
+      <div class="row">
+        <span class="who">maya-singh</span> requested review from <span class="who">you</span> 14 minutes ago
+      </div>
+      <div class="row">
+        Adds a 900px-radius crop around the cursor and draws a marker on the full display capture. Main logic is in <span class="file">src-tauri/src/capture.rs</span>. Would love a look before I wire the overlay.
+      </div>
+      <div class="row">
+        Checklist: retina scale, clamp to display bounds, discard PNG bytes after extract. No persistence of screenshots.
+      </div>
+    </div>
+  </div>
+</body>
+</html>

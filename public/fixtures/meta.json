@@ -1,0 +1,10 @@
+{
+  "slack-thread": {
+    "sourceApp": "Slack",
+    "caption": "Follow up with Adam about the Q3 launch timeline"
+  },
+  "github-pr": {
+    "sourceApp": "GitHub",
+    "caption": "Review PR #482: add cursor-aware screenshot crop"
+  }
+}

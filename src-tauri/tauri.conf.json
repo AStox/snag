@@ -1,0 +1,72 @@
+{
+  "productName": "Snag",
+  "version": "0.1.0",
+  "identifier": "com.astox.snag",
+  "build": {
+    "devUrl": "http://localhost:1420",
+    "frontendDist": "../dist",
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build"
+  },
+  "app": {
+    "macOSPrivateApi": true,
+    "windows": [
+      {
+        "label": "main",
+        "title": "Snag",
+        "width": 440,
+        "height": 680,
+        "minWidth": 380,
+        "minHeight": 480,
+        "hiddenTitle": true,
+        "titleBarStyle": "Overlay",
+        "trafficLightPosition": {
+          "x": 14,
+          "y": 18
+        }
+      },
+      {
+        "label": "overlay",
+        "title": "Snag",
+        "url": "overlay.html",
+        "width": 380,
+        "height": 92,
+        "resizable": false,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "visible": false,
+        "skipTaskbar": true,
+        "shadow": false,
+        "center": true,
+        "focus": true
+      }
+    ],
+    "security": {
+      "csp": null
+    },
+    "trayIcon": {
+      "iconPath": "icons/tray.png",
+      "iconAsTemplate": true,
+      "tooltip": "Snag"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": [
+      "dmg",
+      "app"
+    ],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/icon.png"
+    ],
+    "macOS": {
+      "minimumSystemVersion": "12.0",
+      "infoPlist": "Info.plist",
+      "entitlements": "Entitlements.plist",
+      "hardenedRuntime": true
+    }
+  }
+}
