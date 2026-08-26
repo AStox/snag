@@ -84,10 +84,7 @@ export default function App() {
 
   async function triggerCapture() {
     if (!backend) return;
-    if (session.phase === "listening") {
-      await backend.stopCapture();
-      return;
-    }
+    if (session.phase === "processing") return;
     if (!settings.demoMode && !settings.permissionsExplained && backend.isNative) {
       setExplainOpen(true);
       setSession({ phase: "explain" });
@@ -145,7 +142,7 @@ export default function App() {
       </header>
 
       {settings.demoMode && !showSettings && (
-        <div className="demo-banner">Demo mode — fixtures, no screen or mic required</div>
+        <div className="demo-banner">Demo mode — fixtures, no Screen Recording required</div>
       )}
 
       {showSettings && backend && (
@@ -194,10 +191,14 @@ export default function App() {
               <div className="explain" style={{ padding: "12px 10px 20px" }}>
                 <h3>Before macOS asks</h3>
                 <p>
-                  Snag will capture the display your cursor is on and listen for a short voice
-                  command. Screenshots and audio are not saved — only the task that comes back.
+                  Snag will capture the display your cursor is on and read as much on-screen text
+                  as it can (a Grain transcript, Slack thread, PR). Screenshots are not saved —
+                  only the tasks that come back. You do not need to speak. No per-source APIs.
                 </p>
-                <p>You’ll see two system prompts: Screen Recording, then Microphone.</p>
+                <p>
+                  You’ll see system prompts for Screen Recording and Accessibility. Accessibility
+                  is how Grain-length documents get read. Microphone is optional and not required.
+                </p>
                 <div className="actions-row">
                   <button className="btn" type="button" onClick={() => { setExplainOpen(false); setSession({ phase: "idle" }); }}>
                     Not now
@@ -223,9 +224,9 @@ export default function App() {
               <div className="empty">
                 <h2>Nothing here yet</h2>
                 <p>
-                  Point at a thread, a PR, a PDF, anything. Press{" "}
-                  <span className="kbd">{formatHotkey(settings.hotkey)}</span> and say
-                  “add this as a task for me”.
+                  Point at a transcript, Slack thread, or PR and press{" "}
+                  <span className="kbd">{formatHotkey(settings.hotkey)}</span>. Snag pulls every
+                  action item — no Grain, Slack, or GitHub APIs.
                 </p>
               </div>
             )}
@@ -241,7 +242,7 @@ export default function App() {
           <footer className="foot">
             <span>Tasks stay on this machine. Captures do not.</span>
             <button className="snag-btn" type="button" onClick={() => void triggerCapture()}>
-              {session.phase === "listening" ? "Stop" : "Snag"}
+              Snag
             </button>
           </footer>
         </>

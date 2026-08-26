@@ -43,7 +43,6 @@ impl LiveSession {
 struct AppState {
     db: Db,
     live: Mutex<LiveSession>,
-    _demo_hotkey: Mutex<String>,
 }
 
 fn emit_session(app: &AppHandle, state: SessionState) {
@@ -136,7 +135,7 @@ fn reregister_hotkey(app: &AppHandle, hotkey: &str) {
     if key.is_empty() {
         return;
     }
-    if let Err(err) = gs.on_shortcut(key.to_string(), |app, _shortcut, event| {
+    if let Err(err) = gs.on_shortcut(key, |app, _shortcut, event| {
         if event.state != ShortcutState::Pressed {
             return;
         }
@@ -149,13 +148,7 @@ fn reregister_hotkey(app: &AppHandle, hotkey: &str) {
 fn handle_hotkey(app: &AppHandle) -> Result<(), SnagError> {
     let state = app.state::<AppState>();
     let phase = state.live.lock().expect("live").phase.clone();
-    if phase == "listening" {
-        let app = app.clone();
-        tauri::async_runtime::spawn(async move {
-            let _ = finish_capture(app).await;
-        });
-        return Ok(());
-    }
+    // Second hotkey during processing is ignored. No listen/stop toggle.
     if phase == "processing" {
         return Ok(());
     }
@@ -169,6 +162,12 @@ fn start_capture(app: AppHandle) -> Result<(), SnagError> {
 
 fn start_capture_inner(app: &AppHandle) -> Result<(), SnagError> {
     let state = app.state::<AppState>();
+    {
+        let live = state.live.lock().expect("live");
+        if live.phase == "processing" {
+            return Ok(());
+        }
+    }
     let settings = state.db.get_settings()?;
     if !settings.demo_mode && !settings.permissions_explained && cfg!(target_os = "macos") {
         emit_session(app, SessionState::explain());
@@ -177,66 +176,24 @@ fn start_capture_inner(app: &AppHandle) -> Result<(), SnagError> {
     }
 
     let bundle = capture::capture(settings.demo_mode, &settings.demo_fixture)?;
-    let recorder = if settings.demo_mode {
-        None
-    } else {
-        match Recorder::start() {
-            Ok(r) => Some(r),
-            Err(err) => {
-                log::warn!("mic: {err}");
-                None
-            }
-        }
-    };
+    // Default flow: no mic. Recorder stays on LiveSession so audio.rs keeps compiling.
 
     {
         let mut live = state.live.lock().expect("live");
         *live = LiveSession {
             capture: Some(bundle),
-            recorder,
-            phase: "listening".into(),
+            recorder: None,
+            phase: "processing".into(),
             cancel: false,
         };
     }
 
-    emit_session(app, SessionState::listening());
+    emit_session(app, SessionState::processing());
     show_overlay(app);
 
     let app_handle = app.clone();
-    let demo = settings.demo_mode;
     tauri::async_runtime::spawn(async move {
-        if demo {
-            tokio::time::sleep(Duration::from_millis(1500)).await;
-            let st = app_handle.state::<AppState>();
-            let phase = st.live.lock().expect("live").phase.clone();
-            if phase == "listening" {
-                let _ = finish_capture(app_handle).await;
-            }
-            return;
-        }
-        loop {
-            tokio::time::sleep(Duration::from_millis(180)).await;
-            let st = app_handle.state::<AppState>();
-            let should = {
-                let live = st.live.lock().expect("live");
-                if live.phase != "listening" || live.cancel {
-                    false
-                } else {
-                    live.recorder
-                        .as_ref()
-                        .map(|r| r.should_autostop())
-                        .unwrap_or(false)
-                }
-            };
-            if should {
-                let _ = finish_capture(app_handle).await;
-                break;
-            }
-            let phase = st.live.lock().expect("live").phase.clone();
-            if phase != "listening" {
-                break;
-            }
-        }
+        let _ = finish_capture(app_handle).await;
     });
     Ok(())
 }
@@ -248,16 +205,16 @@ async fn stop_capture(app: AppHandle) -> Result<(), SnagError> {
 
 async fn finish_capture(app: AppHandle) -> Result<(), SnagError> {
     let state = app.state::<AppState>();
-    let (bundle, recorder, cancelled, settings) = {
+    let (bundle, cancelled, settings) = {
         let mut live = state.live.lock().expect("live");
-        if live.phase != "listening" {
+        if live.phase != "processing" {
             return Ok(());
         }
-        live.phase = "processing".into();
         let bundle = live.capture.take();
-        let recorder = live.recorder.take();
         let cancelled = live.cancel;
-        (bundle, recorder, cancelled, state.db.get_settings()?)
+        // Drop any leftover recorder without using it — default flow never starts the mic.
+        let _recorder = live.recorder.take();
+        (bundle, cancelled, state.db.get_settings()?)
     };
     if cancelled {
         emit_session(&app, SessionState::idle());
@@ -265,60 +222,86 @@ async fn finish_capture(app: AppHandle) -> Result<(), SnagError> {
         *state.live.lock().expect("live") = LiveSession::idle();
         return Ok(());
     }
+    // Missing bundle while still processing means another finish is already in flight.
     let Some(bundle) = bundle else {
-        emit_session(&app, SessionState::error("Nothing was captured"));
-        hide_overlay(&app);
-        *state.live.lock().expect("live") = LiveSession::idle();
         return Ok(());
     };
 
     emit_session(&app, SessionState::processing());
     show_overlay(&app);
 
-    let mut transcript = String::new();
-    if settings.demo_mode {
-        transcript = "add this as a task for me".into();
-    } else if let Some(rec) = recorder {
-        let wav = rec.stop_wav().unwrap_or_default();
-        if !settings.api_key.is_empty() && settings.provider.as_str() == "openai" {
-            match extract::transcribe_openai(&settings.api_key, &wav).await {
-                Ok(t) => transcript = t,
-                Err(err) => log::warn!("transcribe: {err}"),
-            }
-        }
-        if transcript.trim().is_empty() {
-            transcript = "add this as a task for me".into();
-        }
-        let _ = wav; // discarded — never persisted
-    } else {
-        transcript = "add this as a task for me".into();
+    // Short beat so the overlay is readable (demo has no model latency).
+    tokio::time::sleep(Duration::from_millis(380)).await;
+    if aborted(&app) {
+        settle_idle(&app);
+        return Ok(());
     }
 
-    let extracted = extract::extract(&settings, &bundle, &transcript).await;
+    let window_title = bundle.window_title.clone();
+    let extracted = extract::extract(&settings, &bundle, "").await;
     drop(bundle); // screenshots discarded
 
+    if aborted(&app) {
+        settle_idle(&app);
+        return Ok(());
+    }
+
+    let filed: Vec<_> = extracted.into_iter().filter(extract::should_file).collect();
+    if filed.is_empty() {
+        {
+            let mut live = state.live.lock().expect("live");
+            live.phase = "done".into();
+        }
+        emit_session(&app, SessionState::done("Nothing to snag".into()));
+        tokio::time::sleep(Duration::from_millis(1400)).await;
+        settle_idle(&app);
+        return Ok(());
+    }
+
     let now = chrono::Utc::now().to_rfc3339();
-    let task = Task {
-        id: uuid::Uuid::new_v4().to_string(),
-        title: extracted.title.clone(),
-        notes: extracted.notes,
-        status: TaskStatus::Inbox,
-        due_hint: extracted.due_hint,
-        source_app: extracted.source_app,
-        source_window: bundle.window_title.clone(),
-        confidence: Some(extracted.confidence),
-        created_at: now.clone(),
-        updated_at: now,
-        completed_at: None,
-    };
-    state.db.insert_task(&task)?;
+    let overlay = extract::overlay_title(&filed);
+    for item in filed {
+        let task = Task {
+            id: uuid::Uuid::new_v4().to_string(),
+            title: item.title,
+            notes: item.notes,
+            status: TaskStatus::Inbox,
+            due_hint: item.due_hint,
+            source_app: item.source_app,
+            source_window: window_title.clone(),
+            confidence: Some(item.confidence),
+            created_at: now.clone(),
+            updated_at: now.clone(),
+            completed_at: None,
+        };
+        state.db.insert_task(&task)?;
+    }
     emit_tasks(&app);
-    emit_session(&app, SessionState::done(task.title));
+    {
+        let mut live = state.live.lock().expect("live");
+        live.phase = "done".into();
+    }
+    emit_session(&app, SessionState::done(overlay));
     tokio::time::sleep(Duration::from_millis(1400)).await;
-    emit_session(&app, SessionState::idle());
-    hide_overlay(&app);
-    *state.live.lock().expect("live") = LiveSession::idle();
+    settle_idle(&app);
     Ok(())
+}
+
+fn aborted(app: &AppHandle) -> bool {
+    let state = app.state::<AppState>();
+    let live = state.live.lock().expect("live");
+    live.cancel || live.phase != "processing"
+}
+
+fn settle_idle(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    let mut live = state.live.lock().expect("live");
+    if live.phase == "done" {
+        *live = LiveSession::idle();
+        drop(live);
+        emit_session(app, SessionState::idle());
+        hide_overlay(app);
+    }
 }
 
 #[tauri::command]
@@ -347,7 +330,6 @@ pub fn run() {
             app.manage(AppState {
                 db,
                 live: Mutex::new(LiveSession::idle()),
-                demo_hotkey: Mutex::new(hotkey.clone()),
             });
 
             let show = MenuItem::with_id(app, "show", "Show Inbox", true, None::<&str>)?;

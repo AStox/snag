@@ -135,10 +135,11 @@ impl SessionState {
             error: None,
         }
     }
+    #[allow(dead_code)]
     pub fn listening() -> Self {
         Self {
             phase: "listening".into(),
-            hint: Some("Point at something. Speak, pause, or hit the hotkey again.".into()),
+            hint: Some("Whatever is under the cursor.".into()),
             title: None,
             error: None,
         }
@@ -146,15 +147,20 @@ impl SessionState {
     pub fn processing() -> Self {
         Self {
             phase: "processing".into(),
-            hint: Some("Figuring it out…".into()),
+            hint: Some("Whatever is under the cursor.".into()),
             title: None,
             error: None,
         }
     }
     pub fn done(title: String) -> Self {
+        let nothing = title == "Nothing to snag";
         Self {
             phase: "done".into(),
-            hint: Some("Saved locally — screenshot and audio discarded.".into()),
+            hint: if nothing {
+                None
+            } else {
+                Some("Saved locally — screenshot discarded.".into())
+            },
             title: Some(title),
             error: None,
         }
@@ -162,7 +168,7 @@ impl SessionState {
     pub fn explain() -> Self {
         Self {
             phase: "explain".into(),
-            hint: Some("Screen Recording and Microphone. Continues after you allow.".into()),
+            hint: Some("Screen Recording and Accessibility. Microphone is optional and not required.".into()),
             title: None,
             error: None,
         }
@@ -183,6 +189,7 @@ impl SessionState {
 pub struct PermissionStatus {
     pub screen: String,
     pub microphone: String,
+    pub accessibility: String,
     pub platform: String,
 }
 
@@ -194,6 +201,8 @@ pub struct ExtractedTask {
     pub due_hint: Option<String>,
     pub source_app: Option<String>,
     pub confidence: f32,
+    #[serde(default)]
+    pub has_task: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -205,6 +214,8 @@ pub struct CaptureBundle {
     pub source_app: Option<String>,
     pub window_title: Option<String>,
     pub fixture_id: Option<String>,
+    /// Accessibility-scraped on-screen document (transcript, thread, PR). None if AX is off or demo.
+    pub document_text: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -215,6 +226,7 @@ pub struct FixtureMeta {
     pub caption: &'static str,
     pub notes_hint: &'static str,
     pub due_hint: Option<&'static str>,
+    pub extra_caption: Option<&'static str>,
     pub cursor_x: u32,
     pub cursor_y: u32,
     pub png: &'static [u8],
@@ -229,6 +241,7 @@ pub fn fixtures() -> [FixtureMeta; 2] {
             caption: "Follow up with Adam about the Q3 launch timeline",
             notes_hint: "Adam asked whether the mobile cut is still targeting Sept 12, and whether legal review is blocking the help-center copy. Thread in #eng-launch.",
             due_hint: Some("Sept 12"),
+            extra_caption: Some("Check whether legal review is blocking the help-center copy"),
             cursor_x: 560,
             cursor_y: 318,
             png: include_bytes!("../fixtures/slack-thread.png"),
@@ -240,6 +253,7 @@ pub fn fixtures() -> [FixtureMeta; 2] {
             caption: "Review PR #482: add cursor-aware screenshot crop",
             notes_hint: "Maya requested review on feat/snag-crop. Adds a 900px-radius crop around the cursor and draws a marker on the full display capture. Waiting on a look at capture.rs.",
             due_hint: None,
+            extra_caption: None,
             cursor_x: 640,
             cursor_y: 280,
             png: include_bytes!("../fixtures/github-pr.png"),

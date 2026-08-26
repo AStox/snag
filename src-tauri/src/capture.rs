@@ -28,13 +28,14 @@ pub fn capture_demo(pref: &str) -> Result<CaptureBundle> {
         source_app: Some(f.source_app.into()),
         window_title: Some(f.window_title.into()),
         fixture_id: Some(f.id.into()),
+        document_text: None,
     })
 }
 
 #[cfg(target_os = "macos")]
 mod macos {
     use super::*;
-    use core_foundation::base::{CFRelease, TCFType};
+    use core_foundation::base::{CFGetTypeID, CFRelease, TCFType};
     use core_foundation::data::CFData;
     use core_foundation::string::CFString;
     use core_graphics::display::{CGDisplay, CGPoint};
@@ -71,7 +72,26 @@ mod macos {
             attribute: *const std::ffi::c_void,
             value: *mut *mut std::ffi::c_void,
         ) -> i32;
-        }
+        fn AXUIElementCopyElementAtPosition(
+            application: *mut std::ffi::c_void,
+            x: f32,
+            y: f32,
+            element: *mut *mut std::ffi::c_void,
+        ) -> i32;
+        fn AXIsProcessTrusted() -> bool;
+    }
+
+    #[link(name = "CoreFoundation", kind = "framework")]
+    extern "C" {
+        fn CFArrayGetTypeID() -> usize;
+        fn CFArrayGetCount(the_array: *const std::ffi::c_void) -> isize;
+        fn CFArrayGetValueAtIndex(
+            the_array: *const std::ffi::c_void,
+            idx: isize,
+        ) -> *const std::ffi::c_void;
+        fn CFStringGetTypeID() -> usize;
+        fn CFRetain(cf: *const std::ffi::c_void) -> *const std::ffi::c_void;
+    }
 
     pub fn capture_now() -> Result<CaptureBundle> {
         unsafe { capture_now_inner() }
@@ -157,8 +177,9 @@ mod macos {
 
     unsafe fn cursor_point() -> Result<CGPoint> {
         let source = CGEventSource::new(CGEventSourceStateID::CombinedSessionState)
-            .ok_or_else(|| SnagError::from("Could not read cursor (event source)"))?;
-        let event = CGEvent::new(source).ok_or_else(|| SnagError::from("Could not read cursor"))?;
+            .map_err(|_| SnagError::from("Could not read cursor (event source)"))?;
+        let event =
+            CGEvent::new(source).map_err(|_| SnagError::from("Could not read cursor"))?;
         Ok(event.location())
     }
 
@@ -167,7 +188,7 @@ mod macos {
         let mut count: u32 = 0;
         let rc = CGGetDisplaysWithPoint(pt, 1, &mut id, &mut count);
         if rc != 0 || count == 0 {
-            Ok(CGDisplay::main().id())
+            Ok(CGDisplay::main().id)
         } else {
             Ok(id)
         }
@@ -247,7 +268,208 @@ mod macos {
             source_app: frontmost_app(),
             window_title: focused_window_title(),
             fixture_id: None,
+            document_text: document_text_at_cursor(pt),
         })
+    }
+
+    const AX_PARENT_WALKS: usize = 12;
+    const AX_MAX_CHILD_NODES: usize = 80;
+    const AX_MAX_CHARS: usize = 80_000;
+    const AX_LONG_SELECTED: usize = 80;
+
+    fn document_text_at_cursor(pt: CGPoint) -> Option<String> {
+        // Never crash capture if Accessibility is off or AX hangs-ish.
+        if !unsafe { AXIsProcessTrusted() } {
+            return None;
+        }
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe { scrape_ax(pt) }))
+            .ok()
+            .flatten()
+    }
+
+    unsafe fn ax_copy_attr(element: *mut std::ffi::c_void, attr: &str) -> *mut std::ffi::c_void {
+        if element.is_null() {
+            return std::ptr::null_mut();
+        }
+        let key = CFString::new(attr);
+        let mut value: *mut std::ffi::c_void = std::ptr::null_mut();
+        let err = AXUIElementCopyAttributeValue(
+            element,
+            key.as_concrete_TypeRef() as _,
+            &mut value,
+        );
+        if err != 0 {
+            std::ptr::null_mut()
+        } else {
+            value
+        }
+    }
+
+    unsafe fn ax_copy_string(element: *mut std::ffi::c_void, attr: &str) -> Option<String> {
+        let value = ax_copy_attr(element, attr);
+        if value.is_null() {
+            return None;
+        }
+        if CFGetTypeID(value as _) as usize != CFStringGetTypeID() {
+            CFRelease(value as _);
+            return None;
+        }
+        let cf = CFString::wrap_under_create_rule(value as _);
+        let s = cf.to_string();
+        if s.trim().is_empty() {
+            None
+        } else {
+            Some(s)
+        }
+    }
+
+    unsafe fn collect_strings(
+        element: *mut std::ffi::c_void,
+        fragments: &mut Vec<String>,
+        selected: &mut Vec<String>,
+        total_chars: &mut usize,
+    ) {
+        if *total_chars >= AX_MAX_CHARS {
+            return;
+        }
+        for attr in [
+            "AXValue",
+            "AXSelectedText",
+            "AXDescription",
+            "AXTitle",
+            "AXDocument",
+        ] {
+            if let Some(s) = ax_copy_string(element, attr) {
+                *total_chars = total_chars.saturating_add(s.len());
+                if attr == "AXSelectedText" {
+                    selected.push(s.clone());
+                }
+                fragments.push(s);
+                if *total_chars >= AX_MAX_CHARS {
+                    return;
+                }
+            }
+        }
+    }
+
+    unsafe fn ax_children_retained(element: *mut std::ffi::c_void) -> Vec<*mut std::ffi::c_void> {
+        let arr = ax_copy_attr(element, "AXChildren");
+        if arr.is_null() {
+            return Vec::new();
+        }
+        if CFGetTypeID(arr as _) as usize != CFArrayGetTypeID() {
+            CFRelease(arr as _);
+            return Vec::new();
+        }
+        let count = CFArrayGetCount(arr as _);
+        let mut out = Vec::new();
+        for i in 0..count {
+            let item = CFArrayGetValueAtIndex(arr as _, i) as *mut std::ffi::c_void;
+            if !item.is_null() {
+                CFRetain(item as _);
+                out.push(item);
+            }
+        }
+        CFRelease(arr as _);
+        out
+    }
+
+    fn compose_document(selected: &[String], fragments: &[String]) -> Option<String> {
+        let longest_sel = selected.iter().max_by_key(|s| s.len());
+        let longest = fragments.iter().max_by_key(|s| s.len());
+        let mut parts: Vec<&str> = Vec::new();
+        if let Some(sel) = longest_sel {
+            if sel.len() >= AX_LONG_SELECTED {
+                parts.push(sel.as_str());
+            }
+        }
+        if let Some(long) = longest {
+            let dup = parts.first().map(|p| *p == long.as_str()).unwrap_or(false);
+            if !dup {
+                parts.push(long.as_str());
+            }
+        }
+        if parts.is_empty() {
+            return None;
+        }
+        let mut joined = parts.join("\n\n");
+        if joined.len() > AX_MAX_CHARS {
+            joined.truncate(AX_MAX_CHARS);
+        }
+        let t = joined.trim();
+        if t.is_empty() {
+            None
+        } else {
+            Some(t.to_string())
+        }
+    }
+
+    unsafe fn scrape_ax(pt: CGPoint) -> Option<String> {
+        use std::collections::VecDeque;
+
+        let system = AXUIElementCreateSystemWide();
+        if system.is_null() {
+            return None;
+        }
+        let mut el: *mut std::ffi::c_void = std::ptr::null_mut();
+        let err = AXUIElementCopyElementAtPosition(system, pt.x as f32, pt.y as f32, &mut el);
+        CFRelease(system as _);
+        if err != 0 || el.is_null() {
+            return None;
+        }
+
+        let mut fragments: Vec<String> = Vec::new();
+        let mut selected: Vec<String> = Vec::new();
+        let mut total_chars: usize = 0;
+
+        let mut current = el;
+        let mut parent_chain: Vec<*mut std::ffi::c_void> = vec![el];
+        for _ in 0..AX_PARENT_WALKS {
+            collect_strings(current, &mut fragments, &mut selected, &mut total_chars);
+            let parent = ax_copy_attr(current, "AXParent");
+            if parent.is_null() {
+                break;
+            }
+            parent_chain.push(parent);
+            current = parent;
+        }
+
+        let start = *parent_chain.last().unwrap_or(&el);
+        let mut queue: VecDeque<*mut std::ffi::c_void> = VecDeque::new();
+        let mut owned_children: Vec<*mut std::ffi::c_void> = Vec::new();
+        for k in ax_children_retained(start) {
+            queue.push_back(k);
+            owned_children.push(k);
+        }
+
+        let mut nodes = 0usize;
+        while let Some(node) = queue.pop_front() {
+            if nodes >= AX_MAX_CHILD_NODES || total_chars >= AX_MAX_CHARS {
+                break;
+            }
+            nodes += 1;
+            collect_strings(node, &mut fragments, &mut selected, &mut total_chars);
+            if nodes >= AX_MAX_CHILD_NODES || total_chars >= AX_MAX_CHARS {
+                break;
+            }
+            for k in ax_children_retained(node) {
+                if owned_children.len() >= AX_MAX_CHILD_NODES {
+                    CFRelease(k as _);
+                    continue;
+                }
+                queue.push_back(k);
+                owned_children.push(k);
+            }
+        }
+
+        for p in parent_chain {
+            CFRelease(p as _);
+        }
+        for c in owned_children {
+            CFRelease(c as _);
+        }
+
+        compose_document(&selected, &fragments)
     }
 }
 

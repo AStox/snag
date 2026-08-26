@@ -7,6 +7,7 @@ export type FixtureMeta = {
   caption: string;
   notesHint: string;
   dueHint: string | null;
+  extraCaption: string | null;
   cursor: { x: number; y: number };
   image: string;
 };
@@ -20,6 +21,7 @@ export const FIXTURES: Record<FixtureId, FixtureMeta> = {
     notesHint:
       "Adam asked whether the mobile cut is still targeting Sept 12, and whether legal review is blocking the help-center copy. Thread in #eng-launch.",
     dueHint: "Sept 12",
+    extraCaption: "Check whether legal review is blocking the help-center copy",
     cursor: { x: 560, y: 318 },
     image: "/fixtures/slack-thread.png",
   },
@@ -31,6 +33,7 @@ export const FIXTURES: Record<FixtureId, FixtureMeta> = {
     notesHint:
       "Maya requested review on feat/snag-crop. Adds a 900px-radius crop around the cursor and draws a marker on the full display capture. Waiting on a look at capture.rs.",
     dueHint: null,
+    extraCaption: null,
     cursor: { x: 640, y: 280 },
     image: "/fixtures/github-pr.png",
   },

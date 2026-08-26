@@ -2,22 +2,49 @@ use base64::Engine;
 use serde_json::{json, Value};
 
 use crate::error::{Result, SnagError};
-use crate::models::{fixtures, AppSettings, CaptureBundle, ExtractedTask, Provider};
+use crate::models::{fixtures, AppSettings, CaptureBundle, ExtractedTask, FixtureMeta, Provider};
 
-const SYSTEM: &str = r#"You turn an on-screen moment into a single TODO.
+const DOCUMENT_CHAR_LIMIT: usize = 24_000;
+
+const SYSTEM: &str = r#"You are extracting ALL todos from an on-screen moment. The user hit a snag hotkey on this content, so they believe there is work in it.
 
 Return JSON only:
-{"title": string, "notes": string, "due_hint": string|null, "source_app": string|null, "confidence": number}
+{"tasks":[{"title": string, "notes": string, "due_hint": string|null, "source_app": string|null, "confidence": number}]}
 
 Rules:
-- title is imperative, specific, at most ~80 characters. Something a person would write on a sticky note.
-- If the user said something generic ("add this", "add this as a task for me", "snag this"), the SCREEN is the content. Infer the task from what is under/near the cursor (marked with a red ring and dot).
-- If the user said something specific, prefer their words as the title; use the screen as notes and context.
-- notes capture people, quotes, links, and extra detail visible or spoken. Do not invent.
-- due_hint is a short phrase like "Friday" or "Sept 12" when visible or spoken, else null.
+- If it looks like a meeting transcript (Grain, Zoom recap, Fathom, etc.), treat it as a transcript: pull every action item, owner, due date. Multiple tasks are expected.
+- If it's a single Slack ask, one task is fine.
+- Do not invent work that isn't there. Empty tasks array = nothing to snag.
+- Do not invent a junk todo such as "Follow up in Grain" or "Follow up in Slack" when nothing specific is actionable.
+- On-screen DOCUMENT TEXT is the source of truth when present. Images are layout/context (who is highlighted, UI chrome).
+- title is imperative, specific, at most ~80 characters. Something a person would write on a sticky note. Include owner when visible.
+- notes capture people, quotes, links, extra detail, and due context. Do not invent.
+- due_hint is a short phrase like "Friday" or "Sept 12" when visible, else null.
 - source_app is the app if you can tell, else the provided frontmost app.
 - confidence is 0-1.
 "#;
+
+const ACTION_MARKERS: &[&str] = &[
+    "todo",
+    "action:",
+    "action item",
+    "i'll",
+    "i will",
+    "can you",
+    "follow up",
+    "we should",
+    "please ",
+    "need to",
+    "needs to",
+    "assigned to",
+    "[ ]",
+    "- [ ]",
+    "will you",
+    "let's",
+    "lets ",
+    "make sure",
+    "owner:",
+];
 
 fn is_generic(transcript: &str) -> bool {
     let s = transcript
@@ -59,6 +86,10 @@ fn clean_title(raw: &str) -> String {
 
 fn regex_lite(raw: &str) -> String {
     let mut t = raw.trim().to_string();
+    t = t
+        .trim_start_matches(['-', '*', '•', '–', '—'])
+        .trim()
+        .to_string();
     let prefixes = [
         "please add this as a task for me",
         "add this as a task for me",
@@ -71,77 +102,204 @@ fn regex_lite(raw: &str) -> String {
         "remind me to ",
         "create a task to ",
         "create a task ",
+        "todo:",
+        "todo ",
+        "action item:",
+        "action:",
+        "action -",
+        "[ ] ",
+        "- [ ] ",
     ];
     let lower = t.to_lowercase();
     for p in prefixes {
         if lower.starts_with(p) {
-            t = t[p.len()..].trim().trim_start_matches(':').trim().to_string();
+            t = t[p.len()..]
+                .trim()
+                .trim_start_matches(':')
+                .trim()
+                .to_string();
             break;
         }
     }
     t.trim_end_matches('.').to_string()
 }
 
-pub fn heuristic(transcript: &str, capture: &CaptureBundle) -> ExtractedTask {
+pub fn looks_like_action(line: &str) -> bool {
+    let l = line.trim().to_lowercase();
+    if l.len() < 8 {
+        return false;
+    }
+    ACTION_MARKERS.iter().any(|m| l.contains(m))
+}
+
+fn is_long_document(doc: &str) -> bool {
+    doc.chars().count() > 400 || doc.lines().filter(|l| !l.trim().is_empty()).count() > 6
+}
+
+fn truncate_chars(s: &str, max: usize) -> String {
+    let count = s.chars().count();
+    if count <= max {
+        return s.to_string();
+    }
+    let idx = s
+        .char_indices()
+        .nth(max)
+        .map(|(i, _)| i)
+        .unwrap_or(s.len());
+    format!("{}…", &s[..idx])
+}
+
+fn document_for_model(capture: &CaptureBundle) -> String {
+    match &capture.document_text {
+        Some(s) if !s.trim().is_empty() => truncate_chars(s.trim(), DOCUMENT_CHAR_LIMIT),
+        _ => String::new(),
+    }
+}
+
+fn make_task(
+    title: String,
+    notes: String,
+    due_hint: Option<String>,
+    source_app: Option<String>,
+    confidence: f32,
+) -> ExtractedTask {
+    ExtractedTask {
+        title,
+        notes,
+        due_hint,
+        source_app,
+        confidence,
+        has_task: true,
+    }
+}
+
+fn fixture_tasks(f: &FixtureMeta) -> Vec<ExtractedTask> {
+    let mut out = vec![make_task(
+        f.caption.into(),
+        f.notes_hint.into(),
+        f.due_hint.map(|s| s.to_string()),
+        Some(f.source_app.into()),
+        0.62,
+    )];
+    if let Some(extra) = f.extra_caption {
+        out.push(make_task(
+            extra.into(),
+            f.notes_hint.into(),
+            f.due_hint.map(|s| s.to_string()),
+            Some(f.source_app.into()),
+            0.55,
+        ));
+    }
+    out
+}
+
+fn split_action_lines(doc: &str, capture: &CaptureBundle) -> Vec<ExtractedTask> {
+    let mut tasks = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for line in doc.lines() {
+        let line = line.trim();
+        if line.len() < 8 || !looks_like_action(line) {
+            continue;
+        }
+        let title = clean_title(line);
+        if !should_file_title(&title) {
+            continue;
+        }
+        let key = title.to_lowercase();
+        if !seen.insert(key) {
+            continue;
+        }
+        tasks.push(make_task(
+            title,
+            format!("From on-screen document:\n{}", truncate_chars(line, 400)),
+            None,
+            capture.source_app.clone(),
+            0.55,
+        ));
+        if tasks.len() >= 24 {
+            break;
+        }
+    }
+    tasks
+}
+
+pub fn heuristic(transcript: &str, capture: &CaptureBundle) -> Vec<ExtractedTask> {
     let fixture = capture
         .fixture_id
         .as_deref()
         .and_then(|id| fixtures().into_iter().find(|f| f.id == id));
-    if is_generic(transcript) {
-        if let Some(f) = fixture {
-            return ExtractedTask {
-                title: f.caption.into(),
-                notes: f.notes_hint.into(),
-                due_hint: f.due_hint.map(|s| s.to_string()),
-                source_app: Some(f.source_app.into()),
-                confidence: 0.62,
-            };
+
+    if let Some(doc) = capture.document_text.as_deref() {
+        let trimmed = doc.trim();
+        if !trimmed.is_empty() {
+            if is_long_document(trimmed) {
+                let split = split_action_lines(trimmed, capture);
+                if !split.is_empty() {
+                    return split;
+                }
+                // Long doc with no action-like lines: do not invent work (never "Follow up in Grain").
+                if fixture.is_none() {
+                    return Vec::new();
+                }
+            } else if looks_like_action(trimmed) || trimmed.lines().any(looks_like_action) {
+                let split = split_action_lines(trimmed, capture);
+                if !split.is_empty() {
+                    return split;
+                }
+                let title = clean_title(trimmed.lines().next().unwrap_or(trimmed));
+                if should_file_title(&title) {
+                    return vec![make_task(
+                        title,
+                        truncate_chars(trimmed, 800),
+                        None,
+                        capture.source_app.clone(),
+                        0.58,
+                    )];
+                }
+            }
         }
-        let app = capture
-            .source_app
-            .clone()
-            .unwrap_or_else(|| "the current app".into());
-        return ExtractedTask {
-            title: format!("Follow up in {app}"),
-            notes: if transcript.trim().is_empty() {
-                capture.window_title.clone().unwrap_or_default()
-            } else {
-                format!("Voice: {}", transcript.trim())
+    }
+
+    if let Some(f) = fixture {
+        return fixture_tasks(&f);
+    }
+
+    if !is_generic(transcript) {
+        return vec![make_task(
+            clean_title(transcript),
+            match &capture.source_app {
+                Some(app) => format!("Captured from {app}"),
+                None => String::new(),
             },
-            due_hint: None,
-            source_app: capture.source_app.clone(),
-            confidence: 0.4,
-        };
+            None,
+            capture.source_app.clone(),
+            0.74,
+        )];
     }
-    ExtractedTask {
-        title: clean_title(transcript),
-        notes: match (&fixture, &capture.source_app) {
-            (Some(f), _) => format!("On screen ({}): {}", f.source_app, f.notes_hint),
-            (None, Some(app)) => format!("Captured from {app}"),
-            _ => String::new(),
-        },
-        due_hint: fixture.and_then(|f| f.due_hint.map(|s| s.to_string())),
-        source_app: capture.source_app.clone(),
-        confidence: 0.74,
-    }
+
+    Vec::new()
 }
 
-fn parse_extracted(raw: &str) -> Result<ExtractedTask> {
-    let trimmed = raw.trim();
-    let json_str = if let Some(start) = trimmed.find('{') {
-        let end = trimmed.rfind('}').unwrap_or(trimmed.len() - 1);
-        &trimmed[start..=end]
-    } else {
-        trimmed
-    };
-    let v: Value = serde_json::from_str(json_str)?;
-    Ok(ExtractedTask {
-        title: v
-            .get("title")
-            .and_then(|x| x.as_str())
-            .unwrap_or("Untitled")
-            .trim()
-            .to_string(),
+fn parse_one(v: &Value) -> Option<ExtractedTask> {
+    let title = v
+        .get("title")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if title.is_empty() {
+        return None;
+    }
+    let has_task = v
+        .get("has_task")
+        .or_else(|| v.get("hasTask"))
+        .and_then(|x| x.as_bool())
+        .unwrap_or(true);
+    if !has_task {
+        return None;
+    }
+    Some(ExtractedTask {
+        title,
         notes: v
             .get("notes")
             .and_then(|x| x.as_str())
@@ -149,22 +307,55 @@ fn parse_extracted(raw: &str) -> Result<ExtractedTask> {
             .to_string(),
         due_hint: v
             .get("due_hint")
+            .or_else(|| v.get("dueHint"))
             .and_then(|x| x.as_str())
             .map(|s| s.to_string())
             .filter(|s| !s.is_empty() && s != "null"),
         source_app: v
             .get("source_app")
+            .or_else(|| v.get("sourceApp"))
             .and_then(|x| x.as_str())
             .map(|s| s.to_string())
             .filter(|s| !s.is_empty() && s != "null"),
         confidence: v.get("confidence").and_then(|x| x.as_f64()).unwrap_or(0.5) as f32,
+        has_task: true,
     })
 }
 
+fn json_blob(raw: &str) -> &str {
+    let trimmed = raw.trim();
+    if let Some(start) = trimmed.find('{') {
+        let end = trimmed.rfind('}').unwrap_or(trimmed.len() - 1);
+        &trimmed[start..=end]
+    } else {
+        trimmed
+    }
+}
+
+fn parse_tasks(raw: &str) -> Result<Vec<ExtractedTask>> {
+    let v: Value = serde_json::from_str(json_blob(raw))?;
+    if let Some(arr) = v.get("tasks").and_then(|x| x.as_array()) {
+        return Ok(arr.iter().filter_map(parse_one).collect());
+    }
+    // Legacy single-object shape.
+    Ok(parse_one(&v).into_iter().collect())
+}
+
 fn user_text(transcript: &str, capture: &CaptureBundle) -> String {
+    let doc = document_for_model(capture);
+    let doc_block = if doc.is_empty() {
+        "(none — infer from the images; do not invent work)".to_string()
+    } else {
+        doc
+    };
     format!(
-        "Voice transcript:\n{}\n\nFrontmost app: {}\nWindow title: {}\nCursor: {}, {}\nThe crop is centered on the cursor. A red ring marks the pointer.",
-        if transcript.trim().is_empty() { "(none)" } else { transcript.trim() },
+        "On-screen document text (source of truth when present — may be a Grain/Zoom/Fathom transcript, Slack thread, PR, etc.):\n{}\n\nSpoken transcript (usually empty):\n{}\n\nFrontmost app: {}\nWindow title: {}\nCursor: {}, {}\nThe crop is centered on the cursor. A red ring marks the pointer. Images are layout/context. Extract every action item as a separate task. If nothing is actionable, return {{\"tasks\":[]}}.",
+        doc_block,
+        if transcript.trim().is_empty() {
+            "(none)"
+        } else {
+            transcript.trim()
+        },
         capture.source_app.as_deref().unwrap_or("(unknown)"),
         capture.window_title.as_deref().unwrap_or("(unknown)"),
         capture.cursor_x.round(),
@@ -176,6 +367,7 @@ fn b64(png: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(png)
 }
 
+#[allow(dead_code)]
 pub async fn transcribe_openai(api_key: &str, wav: &[u8]) -> Result<String> {
     if wav.len() < 64 {
         return Ok(String::new());
@@ -206,17 +398,24 @@ pub async fn transcribe_openai(api_key: &str, wav: &[u8]) -> Result<String> {
         .to_string())
 }
 
-async fn openai_vision(settings: &AppSettings, capture: &CaptureBundle, transcript: &str) -> Result<ExtractedTask> {
+async fn openai_chat(
+    settings: &AppSettings,
+    capture: &CaptureBundle,
+    transcript: &str,
+    with_images: bool,
+) -> Result<Vec<ExtractedTask>> {
     let mut content = vec![json!({"type": "text", "text": user_text(transcript, capture)})];
-    content.push(json!({
-        "type": "image_url",
-        "image_url": { "url": format!("data:image/png;base64,{}", b64(&capture.crop_png)) }
-    }));
-    if settings.send_full_screenshot {
+    if with_images {
         content.push(json!({
             "type": "image_url",
-            "image_url": { "url": format!("data:image/png;base64,{}", b64(&capture.full_png)) }
+            "image_url": { "url": format!("data:image/png;base64,{}", b64(&capture.crop_png)) }
         }));
+        if settings.send_full_screenshot {
+            content.push(json!({
+                "type": "image_url",
+                "image_url": { "url": format!("data:image/png;base64,{}", b64(&capture.full_png)) }
+            }));
+        }
     }
     let body = json!({
         "model": settings.model,
@@ -242,25 +441,33 @@ async fn openai_vision(settings: &AppSettings, capture: &CaptureBundle, transcri
     let content = v["choices"][0]["message"]["content"]
         .as_str()
         .ok_or_else(|| SnagError::from("openai response missing content"))?;
-    parse_extracted(content)
+    parse_tasks(content)
 }
 
-async fn anthropic_vision(settings: &AppSettings, capture: &CaptureBundle, transcript: &str) -> Result<ExtractedTask> {
+async fn anthropic_chat(
+    settings: &AppSettings,
+    capture: &CaptureBundle,
+    transcript: &str,
+    with_images: bool,
+) -> Result<Vec<ExtractedTask>> {
     let mut content = Vec::new();
-    content.push(json!({
-        "type": "image",
-        "source": { "type": "base64", "media_type": "image/png", "data": b64(&capture.crop_png) }
-    }));
-    if settings.send_full_screenshot {
+    // Lead with text (source of truth), then images for layout/context.
+    content.push(json!({ "type": "text", "text": format!("{SYSTEM}\n\n{}", user_text(transcript, capture)) }));
+    if with_images {
         content.push(json!({
             "type": "image",
-            "source": { "type": "base64", "media_type": "image/png", "data": b64(&capture.full_png) }
+            "source": { "type": "base64", "media_type": "image/png", "data": b64(&capture.crop_png) }
         }));
+        if settings.send_full_screenshot {
+            content.push(json!({
+                "type": "image",
+                "source": { "type": "base64", "media_type": "image/png", "data": b64(&capture.full_png) }
+            }));
+        }
     }
-    content.push(json!({ "type": "text", "text": format!("{SYSTEM}\n\n{}", user_text(transcript, capture)) }));
     let body = json!({
         "model": settings.model,
-        "max_tokens": 800,
+        "max_tokens": 4096,
         "messages": [{ "role": "user", "content": content }]
     });
     let client = reqwest::Client::new();
@@ -287,40 +494,198 @@ async fn anthropic_vision(settings: &AppSettings, capture: &CaptureBundle, trans
             }
         }
     }
-    parse_extracted(&buf)
+    parse_tasks(&buf)
+}
+
+async fn provider_chat(
+    settings: &AppSettings,
+    capture: &CaptureBundle,
+    transcript: &str,
+    with_images: bool,
+) -> Result<Vec<ExtractedTask>> {
+    match settings.provider {
+        Provider::Openai => openai_chat(settings, capture, transcript, with_images).await,
+        Provider::Anthropic => anthropic_chat(settings, capture, transcript, with_images).await,
+    }
+}
+
+fn polish(mut tasks: Vec<ExtractedTask>, capture: &CaptureBundle) -> Vec<ExtractedTask> {
+    for t in &mut tasks {
+        if t.source_app.is_none() {
+            t.source_app = capture.source_app.clone();
+        }
+        t.has_task = !t.title.trim().is_empty();
+    }
+    tasks.retain(should_file);
+    tasks
 }
 
 pub async fn extract(
     settings: &AppSettings,
     capture: &CaptureBundle,
     transcript: &str,
-) -> ExtractedTask {
+) -> Vec<ExtractedTask> {
     if settings.api_key.trim().is_empty() {
         return heuristic(transcript, capture);
     }
-    let result = match settings.provider {
-        Provider::Openai => openai_vision(settings, capture, transcript).await,
-        Provider::Anthropic => anthropic_vision(settings, capture, transcript).await,
-    };
+    let has_doc = capture
+        .document_text
+        .as_deref()
+        .map(|s| !s.trim().is_empty())
+        .unwrap_or(false);
+
+    let result = provider_chat(settings, capture, transcript, true).await;
     match result {
-        Ok(mut task) => {
-            if task.title.trim().is_empty() {
-                return heuristic(transcript, capture);
-            }
-            if task.source_app.is_none() {
-                task.source_app = capture.source_app.clone();
-            }
-            task
-        }
+        Ok(tasks) => polish(tasks, capture),
         Err(err) => {
-            log::warn!("vision extract failed: {err}");
+            log::warn!("vision+text extract failed: {err}");
+            if has_doc {
+                match provider_chat(settings, capture, transcript, false).await {
+                    Ok(tasks) => return polish(tasks, capture),
+                    Err(err2) => {
+                        log::warn!("text-only extract failed: {err2}");
+                        let mut h = heuristic(transcript, capture);
+                        if h.is_empty() {
+                            return h;
+                        }
+                        if let Some(first) = h.first_mut() {
+                            if !first.notes.is_empty() {
+                                first.notes = format!("{}\n\n(model unavailable: {err2})", first.notes);
+                            } else {
+                                first.notes = format!("model unavailable: {err2}");
+                            }
+                        }
+                        return h;
+                    }
+                }
+            }
             let mut h = heuristic(transcript, capture);
-            if !h.notes.is_empty() {
-                h.notes = format!("{}\n\n(model unavailable: {err})", h.notes);
-            } else {
-                h.notes = format!("model unavailable: {err}");
+            if let Some(first) = h.first_mut() {
+                if !first.notes.is_empty() {
+                    first.notes = format!("{}\n\n(model unavailable: {err})", first.notes);
+                } else {
+                    first.notes = format!("model unavailable: {err}");
+                }
             }
             h
         }
+    }
+}
+
+pub fn should_file_title(title: &str) -> bool {
+    let t = title.trim();
+    if t.is_empty() {
+        return false;
+    }
+    let lower = t.to_lowercase();
+    if lower == "untitled" || lower == "nothing to snag" || lower == "n/a" || lower == "none" {
+        return false;
+    }
+    if lower.starts_with("follow up in ") {
+        let rest = lower["follow up in ".len()..].trim();
+        // Junk like "Follow up in Grain" / "Follow up in Slack" — app name only.
+        if !rest.is_empty() && !rest.contains(' ') && rest.len() < 24 {
+            return false;
+        }
+    }
+    true
+}
+
+pub fn should_file(task: &ExtractedTask) -> bool {
+    task.has_task && should_file_title(&task.title)
+}
+
+pub fn overlay_title(tasks: &[ExtractedTask]) -> String {
+    match tasks.len() {
+        0 => "Nothing to snag".into(),
+        1 => tasks[0].title.clone(),
+        n => format!("Snagged {n} tasks"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn junk_follow_up_in_grain() {
+        assert!(!should_file_title("Follow up in Grain"));
+        assert!(!should_file_title("follow up in slack"));
+        assert!(should_file_title("Follow up with Adam about the Q3 launch"));
+    }
+
+    #[test]
+    fn action_markers() {
+        assert!(looks_like_action("TODO: ship the crop"));
+        assert!(looks_like_action("I'll send the recap by Friday"));
+        assert!(looks_like_action("Can you review PR 482?"));
+        assert!(looks_like_action("We should ping legal"));
+        assert!(looks_like_action("Action: Maya owns the docs"));
+        assert!(!looks_like_action("hi"));
+        assert!(!looks_like_action("The weather is nice today"));
+    }
+
+    #[test]
+    fn parse_tasks_array() {
+        let raw = r#"{"tasks":[{"title":"Ping Maya","notes":"PR 482","due_hint":null,"source_app":"GitHub","confidence":0.8},{"title":"","notes":"skip"}]}"#;
+        let tasks = parse_tasks(raw).unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].title, "Ping Maya");
+    }
+
+    #[test]
+    fn parse_empty_and_legacy() {
+        assert!(parse_tasks(r#"{"tasks":[]}"#).unwrap().is_empty());
+        let one = parse_tasks(r#"{"title":"One thing","notes":"","has_task":true,"confidence":0.4}"#).unwrap();
+        assert_eq!(one.len(), 1);
+        let none = parse_tasks(r#"{"title":"","has_task":false}"#).unwrap();
+        assert!(none.is_empty());
+    }
+
+    #[test]
+    fn overlay_copy() {
+        let t = make_task("Hello".into(), "".into(), None, None, 0.5);
+        assert_eq!(overlay_title(&[]), "Nothing to snag");
+        assert_eq!(overlay_title(&[t.clone()]), "Hello");
+        assert_eq!(overlay_title(&[t.clone(), t]), "Snagged 2 tasks");
+    }
+
+    fn bundle(doc: Option<&str>, fixture: Option<&str>) -> CaptureBundle {
+        CaptureBundle {
+            full_png: vec![],
+            crop_png: vec![],
+            cursor_x: 0.0,
+            cursor_y: 0.0,
+            source_app: Some("Grain".into()),
+            window_title: Some("Weekly recap".into()),
+            fixture_id: fixture.map(|s| s.to_string()),
+            document_text: doc.map(|s| s.to_string()),
+        }
+    }
+
+    #[test]
+    fn long_transcript_splits_actions() {
+        let doc = "Weekly recap\n\nMaya: we should ship the crop this week.\nAdam: I will send the timeline by Friday.\nSam: can you review the legal copy?\n(small talk about lunch)\nTODO: ping design for icons\n";
+        let tasks = heuristic("", &bundle(Some(doc), None));
+        let titles: Vec<_> = tasks.iter().map(|t| t.title.to_lowercase()).collect();
+        assert!(titles.len() >= 3, "{titles:?}");
+        assert!(titles.iter().any(|t| t.contains("crop") || t.contains("ship")));
+        assert!(titles.iter().any(|t| t.contains("timeline") || t.contains("friday") || t.contains("send")));
+        assert!(!titles.iter().any(|t| t == "follow up in grain"));
+    }
+
+    #[test]
+    fn long_doc_without_actions_is_empty() {
+        let doc = "lorem ipsum ".repeat(80);
+        let tasks = heuristic("", &bundle(Some(&doc), None));
+        assert!(tasks.is_empty());
+    }
+
+    #[test]
+    fn fixture_returns_caption_and_extra() {
+        let tasks = heuristic("", &bundle(None, Some("slack-thread")));
+        assert_eq!(tasks.len(), 2);
+        assert!(tasks[0].title.contains("Adam"));
+        assert!(tasks[1].title.to_lowercase().contains("legal"));
     }
 }

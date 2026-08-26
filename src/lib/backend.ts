@@ -6,7 +6,7 @@ import type {
 } from "../types";
 import { DEFAULT_SETTINGS } from "../types";
 import { FIXTURES, FIXTURE_ORDER, type FixtureId } from "./fixtures";
-import { heuristicExtract } from "./heuristic";
+import { heuristicExtract, overlayTitle, shouldFile } from "./heuristic";
 
 export type Unlisten = () => void;
 
@@ -75,6 +75,7 @@ function saveSettingsLocal(s: AppSettings) {
 
 let demoIndex = 0;
 let demoTimer: number | null = null;
+let capturePhase: SessionState["phase"] = "idle";
 let sessionListeners: Array<(s: SessionState) => void> = [];
 
 function emitSession(s: SessionState) {
@@ -91,6 +92,57 @@ function pickFixture(settings: AppSettings): FixtureId {
 
 function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+async function completeWebCapture() {
+  if (capturePhase !== "processing") return;
+  emitSession({ phase: "processing", hint: "Whatever is under the cursor." });
+  await sleep(280);
+  if (capturePhase !== "processing") return;
+  const settings = loadSettings();
+  const fixture = FIXTURES[pickFixture(settings)];
+  const extracted = heuristicExtract("", fixture, fixture.sourceApp, null).filter(shouldFile);
+  if (extracted.length === 0) {
+    capturePhase = "done";
+    emitSession({ phase: "done", title: "Nothing to snag" });
+    await sleep(1400);
+    if (capturePhase === "done") {
+      capturePhase = "idle";
+      emitSession({ phase: "idle" });
+    }
+    return;
+  }
+  const stamp = nowIso();
+  const tasks = loadTasks();
+  for (const item of extracted) {
+    const task: Task = {
+      id: uid(),
+      title: item.title,
+      notes: item.notes,
+      status: "inbox",
+      dueHint: item.dueHint,
+      sourceApp: item.sourceApp,
+      sourceWindow: fixture.windowTitle,
+      confidence: item.confidence,
+      createdAt: stamp,
+      updatedAt: stamp,
+      completedAt: null,
+    };
+    tasks.push(task);
+  }
+  saveTasks(tasks);
+  capturePhase = "done";
+  const title = overlayTitle(extracted);
+  emitSession({
+    phase: "done",
+    title,
+    hint: title === "Nothing to snag" ? undefined : "Saved locally — screenshot discarded.",
+  });
+  await sleep(1400);
+  if (capturePhase === "done") {
+    capturePhase = "idle";
+    emitSession({ phase: "idle" });
+  }
 }
 
 const webBackend: Backend = {
@@ -124,53 +176,28 @@ const webBackend: Backend = {
     saveSettingsLocal(settings);
   },
   async startCapture() {
-    const settings = loadSettings();
+    if (capturePhase === "processing") return;
     if (demoTimer) {
       window.clearTimeout(demoTimer);
       demoTimer = null;
     }
-    emitSession({ phase: "listening", hint: "Speak a task — demo will use a fixture" });
+    capturePhase = "processing";
+    emitSession({ phase: "processing", hint: "Whatever is under the cursor." });
+    // Short processing beat — no 1.6s listening delay, no voice.
     demoTimer = window.setTimeout(() => {
-      void webBackend.stopCapture();
-    }, 1600);
-    void settings;
+      demoTimer = null;
+      void completeWebCapture();
+    }, 400);
   },
   async stopCapture() {
-    if (demoTimer) {
-      window.clearTimeout(demoTimer);
-      demoTimer = null;
-    }
-    emitSession({ phase: "processing", hint: "Figuring it out…" });
-    await sleep(700);
-    const settings = loadSettings();
-    const fixture = FIXTURES[pickFixture(settings)];
-    const transcript = "add this as a task for me";
-    const extracted = heuristicExtract(transcript, fixture, fixture.sourceApp);
-    const task: Task = {
-      id: uid(),
-      title: extracted.title,
-      notes: extracted.notes,
-      status: "inbox",
-      dueHint: extracted.dueHint,
-      sourceApp: extracted.sourceApp,
-      sourceWindow: fixture.windowTitle,
-      confidence: extracted.confidence,
-      createdAt: nowIso(),
-      updatedAt: nowIso(),
-      completedAt: null,
-    };
-    const tasks = loadTasks();
-    tasks.push(task);
-    saveTasks(tasks);
-    emitSession({ phase: "done", title: task.title, hint: "Saved" });
-    await sleep(1400);
-    emitSession({ phase: "idle" });
+    // Voice/listen-stop is gone from the default flow. Ignore.
   },
   async cancelCapture() {
     if (demoTimer) {
       window.clearTimeout(demoTimer);
       demoTimer = null;
     }
+    capturePhase = "idle";
     emitSession({ phase: "idle" });
   },
   async acknowledgePermissions() {
@@ -179,7 +206,7 @@ const webBackend: Backend = {
     saveSettingsLocal(s);
   },
   async checkPermissions() {
-    return { screen: "unknown", microphone: "unknown", platform: "other" };
+    return { screen: "unknown", microphone: "unknown", accessibility: "unknown", platform: "other" };
   },
   async requestPermissions() {
     return webBackend.checkPermissions();

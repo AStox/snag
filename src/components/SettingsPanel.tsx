@@ -50,7 +50,7 @@ export function SettingsPanel({
       <div className="toggle">
         <div>
           <strong>Demo mode</strong>
-          <p>Inject fixture screenshots and a fake transcript. Works without macOS permissions or an API key.</p>
+          <p>Inject fixture screenshots. Works without macOS permissions or an API key.</p>
         </div>
         <Switch on={settings.demoMode} onToggle={() => set({ demoMode: !settings.demoMode })} />
       </div>
@@ -120,19 +120,20 @@ export function SettingsPanel({
 
       <div className="privacy">
         <strong>Privacy.</strong> Tasks live in a local SQLite file (or this browser, in Vite demo).
-        Screenshots and microphone audio are held in memory for the capture, then discarded.
-        Nothing is uploaded except the in-memory image and transcript when an API key is set.
+        Screenshots are held in memory for the capture, then discarded.
+        Nothing is uploaded except the in-memory image when an API key is set.
       </div>
 
       <div className="explain">
         <h3>Permissions</h3>
         <p>
           Before macOS prompts, Snag tells you why: Screen Recording to see what’s under the
-          cursor, Microphone for the short voice command. {native ? "This build can request them." : "The Vite UI cannot prompt macOS — use the desktop app for that."}
+          cursor, and Accessibility to read Grain-length documents (transcripts, threads, PRs)
+          without a Grain/Slack/GitHub API. Microphone is optional and not required. {native ? "This build can request Screen Recording and Accessibility." : "The Vite UI cannot prompt macOS — use the desktop app for that."}
         </p>
         {perms && (
           <p>
-            Screen: {perms.screen} · Microphone: {perms.microphone}
+            Screen: {perms.screen} · Accessibility: {perms.accessibility} · Microphone: {perms.microphone}
             {perms.platform !== "macos" ? " · not on macOS" : ""}
           </p>
         )}

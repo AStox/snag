@@ -45,6 +45,7 @@ export type SessionState = {
 export type PermissionStatus = {
   screen: "granted" | "denied" | "unknown";
   microphone: "granted" | "denied" | "unknown";
+  accessibility: "granted" | "denied" | "unknown";
   platform: "macos" | "other";
 };
 
@@ -54,6 +55,7 @@ export type ExtractedTask = {
   dueHint: string | null;
   sourceApp: string | null;
   confidence: number;
+  hasTask: boolean;
 };
 
 export const DEFAULT_SETTINGS: AppSettings = {

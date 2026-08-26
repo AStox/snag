@@ -5,15 +5,26 @@ use std::time::Instant;
 
 use crate::error::{Result, SnagError};
 
+/// cpal's Stream is `!Send`/`!Sync` because of CoreAudio internals. We only
+/// keep it alive so the callback continues; samples live in an Arc/Mutex.
+#[cfg(target_os = "macos")]
+struct MicStream(cpal::Stream);
+
+#[cfg(target_os = "macos")]
+unsafe impl Send for MicStream {}
+#[cfg(target_os = "macos")]
+unsafe impl Sync for MicStream {}
+
 pub struct Recorder {
     samples: Arc<Mutex<Vec<f32>>>,
     sample_rate: u32,
     started: Instant,
     stopped: Arc<AtomicBool>,
     #[cfg(target_os = "macos")]
-    _stream: Option<cpal::Stream>,
+    _stream: Option<MicStream>,
 }
 
+#[allow(dead_code)]
 impl Recorder {
     pub fn start() -> Result<Self> {
         #[cfg(target_os = "macos")]
@@ -153,7 +164,7 @@ mod macos {
             sample_rate,
             started: Instant::now(),
             stopped,
-            _stream: Some(stream),
+            _stream: Some(MicStream(stream)),
         })
     }
 

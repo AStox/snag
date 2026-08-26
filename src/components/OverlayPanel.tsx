@@ -1,11 +1,11 @@
 import type { SessionState } from "../types";
 
 const COPY: Record<string, { title: string; hint: string }> = {
-  listening: { title: "Listening…", hint: "Point at something. Speak, pause, or hit the hotkey again." },
-  processing: { title: "Figuring it out…", hint: "Reading the screen. Nothing is being saved yet." },
-  done: { title: "Snagged", hint: "Saved locally — screenshot and audio discarded." },
+  listening: { title: "Reading the screen…", hint: "Whatever is under the cursor." },
+  processing: { title: "Reading the screen…", hint: "Whatever is under the cursor." },
+  done: { title: "Nothing to snag", hint: "" },
   error: { title: "Couldn’t snag that", hint: "Try again, or check Settings." },
-  explain: { title: "Snag needs two permissions", hint: "Screen Recording and Microphone. Continues after you allow." },
+  explain: { title: "Snag needs Screen Recording and Accessibility", hint: "Screen Recording and Accessibility so Grain-length docs can be read. Microphone is optional." },
 };
 
 export function OverlayPanel({
@@ -16,12 +16,14 @@ export function OverlayPanel({
   onCancel?: () => void;
 }) {
   if (session.phase === "idle") return null;
-  const copy = COPY[session.phase] ?? COPY.listening;
-  const shownTitle = session.phase === "done" ? "Snagged" : copy.title;
+  const copy = COPY[session.phase] ?? COPY.processing;
+  const shownTitle =
+    session.phase === "done" ? session.title || "Nothing to snag" : copy.title;
   const shownHint =
     session.phase === "done"
-      ? session.title || copy.hint
+      ? session.hint || ""
       : session.hint || copy.hint;
+  const canCancel = session.phase === "listening" || session.phase === "processing";
 
   return (
     <div className="pill-card" role="status">
@@ -31,9 +33,9 @@ export function OverlayPanel({
       </div>
       <div className="ov-copy">
         <strong>{shownTitle}</strong>
-        <span>{shownHint}</span>
+        {shownHint ? <span>{shownHint}</span> : null}
       </div>
-      {session.phase === "listening" && (
+      {canCancel && (
         <button className="ov-esc" onClick={onCancel} type="button">
           esc
         </button>

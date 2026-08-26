@@ -6,6 +6,8 @@
   <string>Snag listens for a short voice command so it can turn what is under your cursor into a task. Audio is not saved.</string>
   <key>NSScreenCaptureUsageDescription</key>
   <string>Snag captures the display under your cursor so it can read what is on screen. Screenshots are not saved.</string>
+  <key>NSAccessibilityUsageDescription</key>
+  <string>Snag reads the text under your cursor (for example a Grain transcript, Slack thread, or PR) so it can extract every action item. Text is not saved except as task notes you keep.</string>
   <key>NSAppleEventsUsageDescription</key>
   <string>Snag reads the frontmost app name so the task can remember where it came from.</string>
 </dict>

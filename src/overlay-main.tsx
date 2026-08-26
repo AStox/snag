@@ -29,7 +29,7 @@ function OverlayApp() {
   return (
     <div className="overlay-root">
       <OverlayPanel
-        session={session.phase === "idle" ? { phase: "listening" } : session}
+        session={session.phase === "idle" ? { phase: "processing" } : session}
         onCancel={() => void getBackend().then((b) => b.cancelCapture())}
       />
     </div>

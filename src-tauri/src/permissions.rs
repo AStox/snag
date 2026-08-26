@@ -10,6 +10,12 @@ mod macos {
         fn CGRequestScreenCaptureAccess() -> bool;
     }
 
+    #[link(name = "ApplicationServices", kind = "framework")]
+    extern "C" {
+        fn AXIsProcessTrusted() -> bool;
+        fn AXIsProcessTrustedWithOptions(options: *const std::ffi::c_void) -> bool;
+    }
+
     pub fn screen() -> &'static str {
         unsafe {
             if CGPreflightScreenCaptureAccess() {
@@ -24,6 +30,32 @@ mod macos {
         unsafe {
             let _ = CGRequestScreenCaptureAccess();
             screen()
+        }
+    }
+
+    pub fn accessibility() -> &'static str {
+        unsafe {
+            if AXIsProcessTrusted() {
+                "granted"
+            } else {
+                "denied"
+            }
+        }
+    }
+
+    pub fn request_accessibility() -> &'static str {
+        use core_foundation::base::TCFType;
+        use core_foundation::boolean::CFBoolean;
+        use core_foundation::dictionary::CFDictionary;
+        use core_foundation::string::CFString;
+
+        unsafe {
+            let key = CFString::new("AXTrustedCheckOptionPrompt");
+            let val = CFBoolean::from(true);
+            let dict: CFDictionary<CFString, CFBoolean> =
+                CFDictionary::from_CFType_pairs(&[(key, val)]);
+            let _ = AXIsProcessTrustedWithOptions(dict.as_concrete_TypeRef() as *const _);
+            accessibility()
         }
     }
 
@@ -42,6 +74,7 @@ mod macos {
         }
     }
 
+    #[allow(dead_code)]
     pub fn request_microphone() -> &'static str {
         unsafe {
             let _: () = msg_send![
@@ -72,6 +105,7 @@ pub fn status() -> PermissionStatus {
     PermissionStatus {
         screen: macos::screen().into(),
         microphone: macos::microphone().into(),
+        accessibility: macos::accessibility().into(),
         platform: "macos".into(),
     }
 }
@@ -79,7 +113,10 @@ pub fn status() -> PermissionStatus {
 #[cfg(target_os = "macos")]
 pub fn request() -> PermissionStatus {
     let _ = macos::request_screen();
-    let _ = macos::request_microphone();
+    // Prompt for Accessibility so Grain-length docs can actually be read.
+    let _ = macos::request_accessibility();
+    // Microphone is optional and not required for the default (screen-only) flow.
+    let _ = macos::microphone();
     status()
 }
 
@@ -88,6 +125,7 @@ pub fn status() -> PermissionStatus {
     PermissionStatus {
         screen: "unknown".into(),
         microphone: "unknown".into(),
+        accessibility: "unknown".into(),
         platform: "other".into(),
     }
 }
