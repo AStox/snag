@@ -14,7 +14,55 @@ export type Task = {
   completedAt: string | null;
 };
 
-export type Provider = "openai" | "anthropic";
+export type Provider = "openai" | "anthropic" | "xai";
+
+export type ModelOption = { id: string; label: string };
+
+export const PROVIDER_META: Record<
+  Provider,
+  {
+    label: string;
+    defaultModel: string;
+    keyPlaceholder: string;
+    consoleUrl: string;
+    models: ModelOption[];
+  }
+> = {
+  openai: {
+    label: "OpenAI",
+    defaultModel: "gpt-4o",
+    keyPlaceholder: "sk-…",
+    consoleUrl: "https://platform.openai.com/api-keys",
+    models: [
+      { id: "gpt-4o", label: "GPT-4o" },
+      { id: "gpt-4o-mini", label: "GPT-4o mini" },
+      { id: "gpt-4.1", label: "GPT-4.1" },
+      { id: "gpt-4.1-mini", label: "GPT-4.1 mini" },
+    ],
+  },
+  anthropic: {
+    label: "Anthropic",
+    defaultModel: "claude-sonnet-4-5",
+    keyPlaceholder: "sk-ant-…",
+    consoleUrl: "https://console.anthropic.com/settings/keys",
+    models: [
+      { id: "claude-sonnet-4-5", label: "Sonnet 4.5" },
+      { id: "claude-opus-4-1", label: "Opus 4.1" },
+      { id: "claude-haiku-4-5", label: "Haiku 4.5" },
+    ],
+  },
+  xai: {
+    label: "xAI",
+    defaultModel: "grok-4-fast-non-reasoning",
+    keyPlaceholder: "xai-…",
+    consoleUrl: "https://console.x.ai/team/default/api-keys",
+    models: [
+      { id: "grok-4-fast-non-reasoning", label: "Grok 4 Fast" },
+      { id: "grok-4-fast-reasoning", label: "Grok 4 Fast (reasoning)" },
+      { id: "grok-4.6", label: "Grok 4.6" },
+    ],
+  },
+};
 
 export type AppSettings = {
   hotkey: string;

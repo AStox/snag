@@ -1,4 +1,5 @@
-import type { AppSettings, PermissionStatus } from "../types";
+import type { AppSettings, PermissionStatus, Provider } from "../types";
+import { PROVIDER_META } from "../types";
 import { formatHotkey } from "../lib/backend";
 
 function Switch({
@@ -21,18 +22,30 @@ export function SettingsPanel({
   native,
   onChange,
   onRequestPerms,
+  onOpenConsole,
+  onClose,
 }: {
   settings: AppSettings;
   perms: PermissionStatus | null;
   native: boolean;
   onChange: (s: AppSettings) => void;
   onRequestPerms: () => void;
+  onOpenConsole: (provider: Provider) => void;
+  onClose: () => void;
 }) {
   const set = (patch: Partial<AppSettings>) => onChange({ ...settings, ...patch });
+  const meta = PROVIDER_META[settings.provider];
+  const modelIds = meta.models.map((m) => m.id);
+  const modelValue = modelIds.includes(settings.model) ? settings.model : meta.defaultModel;
 
   return (
     <div className="settings">
-      <h2>Settings</h2>
+      <div className="settings-head">
+        <h2>Settings</h2>
+        <button className="btn" type="button" onClick={onClose}>
+          Done
+        </button>
+      </div>
       <p className="lede">Local only. The key stays on this machine.</p>
 
       <div className="field">
@@ -89,21 +102,30 @@ export function SettingsPanel({
               const provider = e.target.value as AppSettings["provider"];
               set({
                 provider,
-                model: provider === "anthropic" ? "claude-sonnet-4-5" : "gpt-4o",
+                model: PROVIDER_META[provider].defaultModel,
               });
             }}
           >
             <option value="openai">OpenAI</option>
             <option value="anthropic">Anthropic</option>
+            <option value="xai">xAI</option>
           </select>
         </div>
         <div className="field">
           <label>Model</label>
-          <input
-            value={settings.model}
+          <select
+            value={modelValue}
             onChange={(e) => set({ model: e.target.value })}
-            placeholder={settings.provider === "openai" ? "gpt-4o" : "claude-sonnet-4-5"}
-          />
+          >
+            {!modelIds.includes(settings.model) && settings.model ? (
+              <option value={settings.model}>{settings.model}</option>
+            ) : null}
+            {meta.models.map((m) => (
+              <option key={m.id} value={m.id}>
+                {m.label}
+              </option>
+            ))}
+          </select>
         </div>
       </div>
 
@@ -114,8 +136,17 @@ export function SettingsPanel({
           autoComplete="off"
           value={settings.apiKey}
           onChange={(e) => set({ apiKey: e.target.value })}
-          placeholder={settings.provider === "openai" ? "sk-…" : "sk-ant-…"}
+          placeholder={PROVIDER_META[settings.provider].keyPlaceholder}
         />
+        <p className="lede" style={{ marginTop: 8 }}>
+          <button
+            className="btn"
+            type="button"
+            onClick={() => onOpenConsole(settings.provider)}
+          >
+            Get a {PROVIDER_META[settings.provider].label} key
+          </button>
+        </p>
       </div>
 
       <div className="privacy">

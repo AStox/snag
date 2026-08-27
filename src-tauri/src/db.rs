@@ -156,6 +156,9 @@ impl Db {
             if s.hotkey.is_empty() {
                 s.hotkey = "alt+space".into();
             }
+            if s.provider == Provider::Xai && s.model == "grok-4.6" {
+                s.model = "grok-4-fast-non-reasoning".into();
+            }
             Ok(s)
         } else {
             Ok(AppSettings::default())

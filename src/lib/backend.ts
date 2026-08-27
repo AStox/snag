@@ -1,10 +1,11 @@
 import type {
   AppSettings,
   PermissionStatus,
+  Provider,
   SessionState,
   Task,
 } from "../types";
-import { DEFAULT_SETTINGS } from "../types";
+import { DEFAULT_SETTINGS, PROVIDER_META } from "../types";
 import { FIXTURES, FIXTURE_ORDER, type FixtureId } from "./fixtures";
 import { heuristicExtract, overlayTitle, shouldFile } from "./heuristic";
 
@@ -24,6 +25,7 @@ export type Backend = {
   acknowledgePermissions: () => Promise<void>;
   checkPermissions: () => Promise<PermissionStatus>;
   requestPermissions: () => Promise<PermissionStatus>;
+  openProviderConsole: (provider: Provider) => Promise<void>;
   onSession: (fn: (s: SessionState) => void) => Promise<Unlisten>;
   onTasksChanged: (fn: () => void) => Promise<Unlisten>;
 };
@@ -211,6 +213,10 @@ const webBackend: Backend = {
   async requestPermissions() {
     return webBackend.checkPermissions();
   },
+  async openProviderConsole(provider) {
+    const url = PROVIDER_META[provider].consoleUrl;
+    window.open(url, "_blank", "noopener,noreferrer");
+  },
   async onSession(fn) {
     sessionListeners.push(fn);
     const handler = (e: Event) => fn((e as CustomEvent<SessionState>).detail);
@@ -244,6 +250,7 @@ async function nativeBackend(): Promise<Backend> {
     acknowledgePermissions: () => invoke("acknowledge_permissions"),
     checkPermissions: () => invoke<PermissionStatus>("check_permissions"),
     requestPermissions: () => invoke<PermissionStatus>("request_permissions"),
+    openProviderConsole: (provider) => invoke("open_provider_console", { provider }),
     async onSession(fn) {
       const un = await listen<SessionState>("snag://session", (e) => fn(e.payload));
       return () => un();

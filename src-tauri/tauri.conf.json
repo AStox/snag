@@ -30,7 +30,7 @@
         "title": "Snag",
         "url": "overlay.html",
         "width": 380,
-        "height": 92,
+        "height": 76,
         "resizable": false,
         "decorations": false,
         "transparent": true,
@@ -38,8 +38,8 @@
         "visible": false,
         "skipTaskbar": true,
         "shadow": false,
-        "center": true,
-        "focus": true
+        "center": false,
+        "focus": false
       }
     ],
     "security": {

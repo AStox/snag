@@ -62,6 +62,7 @@ pub struct TaskPatch {
 pub enum Provider {
     Openai,
     Anthropic,
+    Xai,
 }
 
 impl Default for Provider {
@@ -75,13 +76,31 @@ impl Provider {
         match self {
             Self::Openai => "openai",
             Self::Anthropic => "anthropic",
+            Self::Xai => "xai",
         }
     }
 
     pub fn parse(s: &str) -> Self {
         match s {
             "anthropic" => Self::Anthropic,
+            "xai" => Self::Xai,
             _ => Self::Openai,
+        }
+    }
+
+    pub fn default_model(&self) -> &'static str {
+        match self {
+            Self::Openai => "gpt-4o",
+            Self::Anthropic => "claude-sonnet-4-5",
+            Self::Xai => "grok-4-fast-non-reasoning",
+        }
+    }
+
+    pub fn console_url(&self) -> &'static str {
+        match self {
+            Self::Openai => "https://platform.openai.com/api-keys",
+            Self::Anthropic => "https://console.anthropic.com/settings/keys",
+            Self::Xai => "https://console.x.ai/team/default/api-keys",
         }
     }
 }

@@ -6,7 +6,7 @@ use crate::models::{fixtures, AppSettings, CaptureBundle, ExtractedTask, Fixture
 
 const DOCUMENT_CHAR_LIMIT: usize = 24_000;
 
-const SYSTEM: &str = r#"You are extracting ALL todos from an on-screen moment. The user hit a snag hotkey on this content, so they believe there is work in it.
+const SYSTEM: &str = r#"You extract todos from an on-screen moment. The user pointed at this with a hotkey. That does not mean there is work.
 
 Return JSON only:
 {"tasks":[{"title": string, "notes": string, "due_hint": string|null, "source_app": string|null, "confidence": number}]}
@@ -14,9 +14,11 @@ Return JSON only:
 Rules:
 - If it looks like a meeting transcript (Grain, Zoom recap, Fathom, etc.), treat it as a transcript: pull every action item, owner, due date. Multiple tasks are expected.
 - If it's a single Slack ask, one task is fine.
-- Do not invent work that isn't there. Empty tasks array = nothing to snag.
+- Empty tasks array is the correct answer when there is nothing a person would put on a sticky note. Prefer {"tasks":[]} over inventing work. The overlay will say "Nothing to snag".
+- Ignore chit-chat, reactions, jokes, tweets/posts with no ask, "looks good", "lol", "they both look good", likes, and UI chrome. Do not file the entire post as a task.
 - Do not invent a junk todo such as "Follow up in Grain" or "Follow up in Slack" when nothing specific is actionable.
-- On-screen DOCUMENT TEXT is the source of truth when present. Images are layout/context (who is highlighted, UI chrome).
+- Only file a task if a reasonable person would do it later: an ask, a commitment, an action item, a bug, a PR to review, a date they own.
+- On-screen DOCUMENT TEXT is the source of truth when present. Images are layout/context (who is highlighted, UI chrome, which app). A downscaled full display may be attached for layout; the crop is what they pointed at.
 - title is imperative, specific, at most ~80 characters. Something a person would write on a sticky note. Include owner when visible.
 - notes capture people, quotes, links, extra detail, and due context. Do not invent.
 - due_hint is a short phrase like "Friday" or "Sept 12" when visible, else null.
@@ -41,7 +43,6 @@ const ACTION_MARKERS: &[&str] = &[
     "- [ ]",
     "will you",
     "let's",
-    "lets ",
     "make sure",
     "owner:",
 ];
@@ -128,6 +129,11 @@ pub fn looks_like_action(line: &str) -> bool {
     let l = line.trim().to_lowercase();
     if l.len() < 8 {
         return false;
+    }
+    if (l.contains("github.com/") || l.contains("gitlab.com/"))
+        && (l.contains("/pull/") || l.contains("/issues/") || l.contains("/merge_requests/"))
+    {
+        return true;
     }
     ACTION_MARKERS.iter().any(|m| l.contains(m))
 }
@@ -398,19 +404,59 @@ pub async fn transcribe_openai(api_key: &str, wav: &[u8]) -> Result<String> {
         .to_string())
 }
 
-async fn openai_chat(
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ExtractReport {
+    pub tasks: Vec<ExtractedTask>,
+    pub path: String,
+    pub model_raw: Option<String>,
+    pub error: Option<String>,
+    pub document_chars: usize,
+    pub used_images: bool,
+    pub task_count: usize,
+}
+
+impl ExtractReport {
+    fn wrap(
+        mut tasks: Vec<ExtractedTask>,
+        capture: &CaptureBundle,
+        path: &str,
+        raw: Option<String>,
+        error: Option<String>,
+        used_images: bool,
+    ) -> Self {
+        tasks = polish(tasks, capture);
+        let task_count = tasks.len();
+        Self {
+            tasks,
+            path: path.into(),
+            model_raw: raw,
+            error,
+            document_chars: capture
+                .document_text
+                .as_deref()
+                .map(|s| s.chars().count())
+                .unwrap_or(0),
+            used_images,
+            task_count,
+        }
+    }
+}
+
+async fn openai_compatible_chat(
     settings: &AppSettings,
     capture: &CaptureBundle,
     transcript: &str,
     with_images: bool,
-) -> Result<Vec<ExtractedTask>> {
+    url: &str,
+    label: &str,
+) -> Result<(Vec<ExtractedTask>, String)> {
     let mut content = vec![json!({"type": "text", "text": user_text(transcript, capture)})];
     if with_images {
         content.push(json!({
             "type": "image_url",
             "image_url": { "url": format!("data:image/png;base64,{}", b64(&capture.crop_png)) }
         }));
-        if settings.send_full_screenshot {
+        if settings.send_full_screenshot && !capture.full_png.is_empty() {
             content.push(json!({
                 "type": "image_url",
                 "image_url": { "url": format!("data:image/png;base64,{}", b64(&capture.full_png)) }
@@ -427,7 +473,7 @@ async fn openai_chat(
     });
     let client = reqwest::Client::new();
     let res = client
-        .post("https://api.openai.com/v1/chat/completions")
+        .post(url)
         .bearer_auth(&settings.api_key)
         .json(&body)
         .send()
@@ -435,13 +481,47 @@ async fn openai_chat(
     let status = res.status();
     let text = res.text().await?;
     if !status.is_success() {
-        return Err(SnagError::from(format!("openai {status}: {text}")));
+        return Err(SnagError::from(format!("{label} {status}: {text}")));
     }
     let v: Value = serde_json::from_str(&text)?;
     let content = v["choices"][0]["message"]["content"]
         .as_str()
-        .ok_or_else(|| SnagError::from("openai response missing content"))?;
-    parse_tasks(content)
+        .ok_or_else(|| SnagError::from(format!("{label} response missing content")))?;
+    Ok((parse_tasks(content)?, content.to_string()))
+}
+
+async fn openai_chat(
+    settings: &AppSettings,
+    capture: &CaptureBundle,
+    transcript: &str,
+    with_images: bool,
+) -> Result<(Vec<ExtractedTask>, String)> {
+    openai_compatible_chat(
+        settings,
+        capture,
+        transcript,
+        with_images,
+        "https://api.openai.com/v1/chat/completions",
+        "openai",
+    )
+    .await
+}
+
+async fn xai_chat(
+    settings: &AppSettings,
+    capture: &CaptureBundle,
+    transcript: &str,
+    with_images: bool,
+) -> Result<(Vec<ExtractedTask>, String)> {
+    openai_compatible_chat(
+        settings,
+        capture,
+        transcript,
+        with_images,
+        "https://api.x.ai/v1/chat/completions",
+        "xai",
+    )
+    .await
 }
 
 async fn anthropic_chat(
@@ -449,7 +529,7 @@ async fn anthropic_chat(
     capture: &CaptureBundle,
     transcript: &str,
     with_images: bool,
-) -> Result<Vec<ExtractedTask>> {
+) -> Result<(Vec<ExtractedTask>, String)> {
     let mut content = Vec::new();
     // Lead with text (source of truth), then images for layout/context.
     content.push(json!({ "type": "text", "text": format!("{SYSTEM}\n\n{}", user_text(transcript, capture)) }));
@@ -458,7 +538,7 @@ async fn anthropic_chat(
             "type": "image",
             "source": { "type": "base64", "media_type": "image/png", "data": b64(&capture.crop_png) }
         }));
-        if settings.send_full_screenshot {
+        if settings.send_full_screenshot && !capture.full_png.is_empty() {
             content.push(json!({
                 "type": "image",
                 "source": { "type": "base64", "media_type": "image/png", "data": b64(&capture.full_png) }
@@ -494,7 +574,7 @@ async fn anthropic_chat(
             }
         }
     }
-    parse_tasks(&buf)
+    Ok((parse_tasks(&buf)?, buf))
 }
 
 async fn provider_chat(
@@ -502,10 +582,11 @@ async fn provider_chat(
     capture: &CaptureBundle,
     transcript: &str,
     with_images: bool,
-) -> Result<Vec<ExtractedTask>> {
+) -> Result<(Vec<ExtractedTask>, String)> {
     match settings.provider {
         Provider::Openai => openai_chat(settings, capture, transcript, with_images).await,
         Provider::Anthropic => anthropic_chat(settings, capture, transcript, with_images).await,
+        Provider::Xai => xai_chat(settings, capture, transcript, with_images).await,
     }
 }
 
@@ -524,9 +605,16 @@ pub async fn extract(
     settings: &AppSettings,
     capture: &CaptureBundle,
     transcript: &str,
-) -> Vec<ExtractedTask> {
+) -> ExtractReport {
     if settings.api_key.trim().is_empty() {
-        return heuristic(transcript, capture);
+        return ExtractReport::wrap(
+            heuristic(transcript, capture),
+            capture,
+            "heuristic",
+            None,
+            None,
+            false,
+        );
     }
     let has_doc = capture
         .document_text
@@ -534,42 +622,115 @@ pub async fn extract(
         .map(|s| !s.trim().is_empty())
         .unwrap_or(false);
 
-    let result = provider_chat(settings, capture, transcript, true).await;
-    match result {
-        Ok(tasks) => polish(tasks, capture),
+    match provider_chat(settings, capture, transcript, true).await {
+        Ok((tasks, raw)) => ExtractReport::wrap(tasks, capture, "vision+text", Some(raw), None, true),
         Err(err) => {
             log::warn!("vision+text extract failed: {err}");
             if has_doc {
                 match provider_chat(settings, capture, transcript, false).await {
-                    Ok(tasks) => return polish(tasks, capture),
+                    Ok((tasks, raw)) => {
+                        return ExtractReport::wrap(
+                            tasks,
+                            capture,
+                            "text-only",
+                            Some(raw),
+                            Some(err.to_string()),
+                            false,
+                        );
+                    }
                     Err(err2) => {
                         log::warn!("text-only extract failed: {err2}");
                         let mut h = heuristic(transcript, capture);
-                        if h.is_empty() {
-                            return h;
-                        }
                         if let Some(first) = h.first_mut() {
                             if !first.notes.is_empty() {
-                                first.notes = format!("{}\n\n(model unavailable: {err2})", first.notes);
+                                first.notes = format!("{}
+
+(model unavailable: {err2})", first.notes);
                             } else {
                                 first.notes = format!("model unavailable: {err2}");
                             }
                         }
-                        return h;
+                        return ExtractReport::wrap(
+                            h,
+                            capture,
+                            "heuristic-fallback",
+                            None,
+                            Some(err2.to_string()),
+                            false,
+                        );
                     }
                 }
             }
             let mut h = heuristic(transcript, capture);
             if let Some(first) = h.first_mut() {
                 if !first.notes.is_empty() {
-                    first.notes = format!("{}\n\n(model unavailable: {err})", first.notes);
+                    first.notes = format!("{}
+
+(model unavailable: {err})", first.notes);
                 } else {
                     first.notes = format!("model unavailable: {err}");
                 }
             }
-            h
+            ExtractReport::wrap(
+                h,
+                capture,
+                "heuristic-fallback",
+                None,
+                Some(err.to_string()),
+                true,
+            )
         }
     }
+}
+
+fn is_chatter(title: &str) -> bool {
+    let s = title
+        .trim()
+        .to_lowercase()
+        .trim_end_matches(['.', '!', '?', ',', '~'])
+        .trim()
+        .to_string();
+    if s.is_empty() {
+        return true;
+    }
+    const EXACT: &[&str] = &[
+        "lgtm",
+        "lol",
+        "lmao",
+        "haha",
+        "thanks",
+        "thank you",
+        "nice",
+        "cool",
+        "yeah",
+        "yep",
+        "yup",
+        "ok",
+        "okay",
+        "same",
+        "agreed",
+        "true",
+        "facts",
+        "mood",
+        "this",
+        "that",
+        "idk",
+        "wow",
+        "omg",
+        "bruh",
+        "sounds good",
+        "looks good",
+        "looks great",
+        "looks fine",
+        "love this",
+        "this is fire",
+        "they both look good",
+        "both look good",
+    ];
+    if EXACT.iter().any(|p| s == *p) {
+        return true;
+    }
+    s.contains("look good") || s.contains("looks good") || s.contains("looks great")
 }
 
 pub fn should_file_title(title: &str) -> bool {
@@ -577,8 +738,15 @@ pub fn should_file_title(title: &str) -> bool {
     if t.is_empty() {
         return false;
     }
+    // Whole tweets / dumped AX blobs are not sticky notes.
+    if t.chars().count() > 140 {
+        return false;
+    }
     let lower = t.to_lowercase();
     if lower == "untitled" || lower == "nothing to snag" || lower == "n/a" || lower == "none" {
+        return false;
+    }
+    if is_chatter(t) {
         return false;
     }
     if lower.starts_with("follow up in ") {
@@ -612,6 +780,22 @@ mod tests {
         assert!(!should_file_title("Follow up in Grain"));
         assert!(!should_file_title("follow up in slack"));
         assert!(should_file_title("Follow up with Adam about the Q3 launch"));
+        assert!(!should_file_title("they both look good!"));
+        assert!(!should_file_title("Looks good"));
+        assert!(!should_file_title("a".repeat(141).as_str()));
+    }
+
+    #[test]
+    fn chatter_and_tweets_are_nothing_to_snag() {
+        let tweet = "lets be honest this is the funniest thing I have seen all week https://x.com/foo/status/1";
+        let tasks = heuristic("", &bundle(Some(tweet), None));
+        assert!(tasks.is_empty(), "{:?}", tasks.iter().map(|t| t.title.clone()).collect::<Vec<_>>());
+        let chat = "Maya: they both look good!\nAdam: lol yeah";
+        let tasks = heuristic("", &bundle(Some(chat), None));
+        assert!(tasks.is_empty(), "{:?}", tasks.iter().map(|t| t.title.clone()).collect::<Vec<_>>());
+        let ask = "Can you review PR 462 today?";
+        let tasks = heuristic("", &bundle(Some(ask), None));
+        assert_eq!(tasks.len(), 1, "{:?}", tasks.iter().map(|t| t.title.clone()).collect::<Vec<_>>());
     }
 
     #[test]
@@ -623,6 +807,8 @@ mod tests {
         assert!(looks_like_action("Action: Maya owns the docs"));
         assert!(!looks_like_action("hi"));
         assert!(!looks_like_action("The weather is nice today"));
+        assert!(!looks_like_action("lets be honest this is funny"));
+        assert!(looks_like_action("Let's ping legal this week"));
     }
 
     #[test]

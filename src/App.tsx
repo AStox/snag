@@ -64,6 +64,10 @@ export default function App() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
+        if (showSettings) {
+          setShowSettings(false);
+          return;
+        }
         backend?.cancelCapture();
         setExplainOpen(false);
         return;
@@ -157,6 +161,10 @@ export default function App() {
             setPerms(p);
             setSettings(await backend.getSettings());
           }}
+          onOpenConsole={(provider) => {
+            void backend.openProviderConsole(provider);
+          }}
+          onClose={() => setShowSettings(false)}
         />
       )}
 

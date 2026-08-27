@@ -2,7 +2,9 @@ use image::{Rgba, RgbaImage, imageops};
 
 use crate::error::Result;
 
-const CROP_RADIUS: i32 = 900;
+pub const CROP_RADIUS: i32 = 900;
+/// Full-display PNG sent to the model is downscaled to this width. Crop stays native.
+pub const FULL_MAX_WIDTH: u32 = 1280;
 
 pub fn decode_png(bytes: &[u8]) -> Result<RgbaImage> {
     let img = image::load_from_memory(bytes)?.to_rgba8();
@@ -10,10 +12,10 @@ pub fn decode_png(bytes: &[u8]) -> Result<RgbaImage> {
 }
 
 pub fn encode_png(img: &RgbaImage) -> Result<Vec<u8>> {
-    use image::codecs::png::PngEncoder;
+    use image::codecs::png::{CompressionType, FilterType, PngEncoder};
     use image::{ColorType, ImageEncoder};
     let mut buf = Vec::new();
-    PngEncoder::new(&mut buf).write_image(
+    PngEncoder::new_with_quality(&mut buf, CompressionType::Fast, FilterType::NoFilter).write_image(
         img.as_raw(),
         img.width(),
         img.height(),
@@ -93,4 +95,46 @@ pub fn mark_and_pack(png: &[u8], cx: u32, cy: u32) -> Result<(Vec<u8>, Vec<u8>)>
 pub fn from_rgba(width: u32, height: u32, rgba: Vec<u8>) -> RgbaImage {
     RgbaImage::from_raw(width, height, rgba)
         .unwrap_or_else(|| RgbaImage::new(width.max(1), height.max(1)))
+}
+
+/// Nearest-neighbor downsample of packed RGBA. Avoids allocating a 5K buffer then resizing.
+pub fn downsample_rgba(
+    width: u32,
+    height: u32,
+    rgba: &[u8],
+    max_width: u32,
+) -> (u32, u32, Vec<u8>) {
+    let width = width.max(1);
+    let height = height.max(1);
+    if width <= max_width {
+        return (width, height, rgba.to_vec());
+    }
+    let scale = max_width as f32 / width as f32;
+    let tw = max_width;
+    let th = ((height as f32) * scale).round().max(1.0) as u32;
+    let mut out = vec![0u8; tw as usize * th as usize * 4];
+    for y in 0..th {
+        let sy = ((y as f32 / scale) as u32).min(height - 1);
+        for x in 0..tw {
+            let sx = ((x as f32 / scale) as u32).min(width - 1);
+            let si = ((sy * width + sx) * 4) as usize;
+            let di = ((y * tw + x) * 4) as usize;
+            if si + 4 <= rgba.len() && di + 4 <= out.len() {
+                out[di..di + 4].copy_from_slice(&rgba[si..si + 4]);
+            }
+        }
+    }
+    (tw, th, out)
+}
+
+pub fn scale_cursor(px: i32, py: i32, src_w: u32, src_h: u32, dst_w: u32, dst_h: u32) -> (i32, i32) {
+    if src_w == 0 || src_h == 0 {
+        return (0, 0);
+    }
+    let nx = (px as f32 * dst_w as f32 / src_w as f32).round() as i32;
+    let ny = (py as f32 * dst_h as f32 / src_h as f32).round() as i32;
+    (
+        nx.clamp(0, dst_w.saturating_sub(1) as i32),
+        ny.clamp(0, dst_h.saturating_sub(1) as i32),
+    )
 }

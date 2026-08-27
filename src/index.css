@@ -319,8 +319,15 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
   padding: 8px 20px 28px;
   z-index: 5;
 }
+.settings-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 4px;
+}
 .settings h2 {
-  margin: 0 0 4px;
+  margin: 0;
   font-size: 16px;
   letter-spacing: -0.02em;
 }
@@ -410,16 +417,23 @@ button:focus-visible, input:focus-visible, textarea:focus-visible {
 }
 
 /* Overlay */
+html.overlay-html,
+html.overlay-html body,
+html.overlay-html #root,
 body.overlay-body {
-  background: transparent;
+  background: transparent !important;
 }
 .overlay-root {
   height: 100%;
   display: flex;
-  align-items: flex-end;
-  justify-content: center;
-  padding: 8px;
+  align-items: stretch;
+  justify-content: stretch;
+  padding: 0;
   background: transparent;
+}
+.overlay-html .pill-card {
+  width: 100%;
+  height: 100%;
 }
 .pill-card {
   width: 100%;
